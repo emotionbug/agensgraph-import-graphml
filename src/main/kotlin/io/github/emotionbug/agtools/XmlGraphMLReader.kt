@@ -2,6 +2,7 @@ package io.github.emotionbug.agtools
 
 import java.io.Reader
 import java.sql.Connection
+import java.sql.Statement
 import java.util.*
 import java.util.function.Function
 import javax.xml.namespace.QName
@@ -16,18 +17,26 @@ import javax.xml.stream.events.XMLEvent
  * Created by mh on 10.07.13.
  */
 
-class XmlGraphMLReader(db: Connection) {
+class XmlGraphMLReader(db: Connection, private val graphName: String) {
     private val db: Connection
+    private var stmt: Statement
+
+    private var nspid: Int = 0
+    private var graphoid: Int = 0
+
     private var defaultRelType: String = "UNKNOWN"
-    private var labels = false
+    private val labels: HashSet<String> = HashSet()
+    private val labelTypes = HashMap<String, Boolean>()
 
     init {
         this.db = db
-    }
+        this.stmt = db.createStatement()
 
-    fun nodeLabels(readLabels: Boolean): XmlGraphMLReader {
-        labels = readLabels
-        return this
+        this.stmt.apply {
+            execute("CREATE GRAPH IF NOT EXISTS $graphName")
+            execute("SET GRAPH_PATH = $graphName")
+            execute("set search_path=${graphName}")
+        }
     }
 
     internal enum class Type {
@@ -196,10 +205,8 @@ class XmlGraphMLReader(db: Connection) {
                         value = key.parseValue(reader.nextEvent().asCharacters().data)
                     }
                     if (value != null) {
-                        if (labels && isNode && id == "labels") {
+                        if (isNode && id == "labels") {
                             addLabels(last as Node, value.toString())
-                        } else if (!labels || isNode || id != "label") {
-                            last.setProperty(key.name, value)
                         }
                     } else if (next.eventType == XMLStreamConstants.END_ELEMENT) {
                         last.setProperty(key.name, EMPTY)
@@ -210,10 +217,10 @@ class XmlGraphMLReader(db: Connection) {
                     last?.let { createRow(it) }
                     val id = getAttribute(element, ID)!!
                     val node: Node = createNode()
-                    if (labels) {
-                        val labels = getAttribute(element, LABELS)
-                        addLabels(node, labels)
-                    }
+
+                    val labels = getAttribute(element, LABELS)
+                    addLabels(node, labels)
+
                     node.setProperty("id", id)
                     setDefaults(nodeKeys, node)
                     last = node
@@ -233,14 +240,103 @@ class XmlGraphMLReader(db: Connection) {
                 }
             }
         }
+        finalize()
+        stmt.close()
+        db.commit()
         return count.toLong()
     }
 
+    private fun finalize() {
+        unlockGraph()
+        // generate graphid
+        for (label in labels) {
+            if (labelTypes[label] == true) {
+                var rs = stmt.executeQuery(
+                    "SELECT column_default\n" +
+                            "FROM information_schema.columns\n" +
+                            "WHERE (table_schema, table_name, column_name) = ('${graphName.lowercase()}', '${label.lowercase()}', 'id')"
+                )
+                var idDefaultSeq = ""
+                var labid = 0
+                if (rs.next()) {
+                    idDefaultSeq = rs.getString(1).split(",")[1]
+                    idDefaultSeq = idDefaultSeq.substring(0, idDefaultSeq.length - 1)
+                }
+                rs.close()
+
+                rs =
+                    stmt.executeQuery("SELECT labid FROM pg_catalog.ag_label WHERE graphid = $graphoid AND labname = '${label.lowercase()}'")
+                if (rs.next()) {
+                    labid = rs.getInt(1)
+                }
+                rs.close()
+
+                stmt.execute("ALTER TABLE ml_${label} ADD COLUMN graphid graphid DEFAULT graphid(${labid}, $idDefaultSeq)")
+                stmt.execute("INSERT INTO ${label}(id, properties) SELECT graphid, property FROM ml_${label}")
+            }
+        }
+
+        // replace to graphid
+        for (label in labels) {
+            if (labelTypes[label] == false) {
+                var rs = stmt.executeQuery(
+                    "SELECT column_default\n" +
+                            "FROM information_schema.columns\n" +
+                            "WHERE (table_schema, table_name, column_name) = ('${graphName.lowercase()}', '${label.lowercase()}', 'id')"
+                )
+                var idDefaultSeq = ""
+                var labid = 0
+                if (rs.next()) {
+                    idDefaultSeq = rs.getString(1).split(",")[1]
+                    idDefaultSeq = idDefaultSeq.substring(0, idDefaultSeq.length - 1)
+                }
+                rs.close()
+
+                rs =
+                    stmt.executeQuery("SELECT labid FROM pg_catalog.ag_label WHERE graphid = $graphoid AND labname = '${label.lowercase()}'")
+                if (rs.next()) {
+                    labid = rs.getInt(1)
+                }
+                rs.close()
+
+                stmt.execute("ALTER TABLE ml_${label} ADD COLUMN graphid graphid DEFAULT graphid(${labid}, $idDefaultSeq), ADD COLUMN from_gid graphid, ADD COLUMN to_gid graphid")
+
+                for (sublabels in labels) {
+                    if (labelTypes[sublabels] == true) {
+                        stmt.execute("UPDATE ml_${label} SET from_gid = ml_${sublabels}.graphid FROM ml_${sublabels} WHERE ml_${label}._from = ml_${sublabels}.id")
+                        stmt.execute("UPDATE ml_${label} SET to_gid = ml_${sublabels}.graphid FROM ml_${sublabels} WHERE ml_${label}._to = ml_${sublabels}.id")
+                    }
+                }
+//                stmt.execute("DELETE FROM ml_${label} WHERE from_gid IS NULL or to_gid IS NULL")
+                stmt.execute("INSERT INTO ${label}(id, start, \"end\", properties) SELECT graphid, from_gid, to_gid, property FROM ml_${label}")
+            }
+        }
+        lockGraph()
+    }
+
     private fun createRow(entity: Entity) {
-        if (entity is Node) {
-            TODO()
-        } else {
-            TODO()
+        if (entity is Node && entity.label != null) {
+            if (!labels.contains(entity.label)) {
+                unlockGraph()
+                stmt.execute("CREATE TABLE ml_${entity.label}(id TEXT PRIMARY KEY, property jsonb)")
+                lockGraph()
+                stmt.execute("CREATE VLABEL ${entity.label}")
+                labels.add(entity.label!!)
+                labelTypes[entity.label!!] = true
+            }
+            stmt.execute("INSERT INTO ml_${entity.label} VALUES ('${entity.id}', $$ ${entity.property.toJSONString()} $$)")
+        } else if (entity is Relationship) {
+            if (!labels.contains(entity.relationshipType)) {
+                unlockGraph()
+                stmt.execute("CREATE TABLE ml_${entity.relationshipType}(_from TEXT, _to TEXT, property jsonb)");
+                stmt.execute("CREATE INDEX idx_${entity.relationshipType}_from ON ml_${entity.relationshipType}(_from)")
+                stmt.execute("CREATE INDEX idx_${entity.relationshipType}_to ON ml_${entity.relationshipType}(_to)")
+                lockGraph()
+                stmt.execute("CREATE ELABEL ${entity.relationshipType}")
+                labels.add(entity.relationshipType)
+                labelTypes[entity.relationshipType] = false
+            }
+            stmt.execute("INSERT INTO ml_${entity.relationshipType}(_from, _to, property) VALUES ('${entity.fromId}', '${entity.toId}', $$ ${entity.property.toJSONString()} $$)")
         }
     }
 
@@ -254,22 +350,20 @@ class XmlGraphMLReader(db: Connection) {
 
     @Throws(XMLStreamException::class)
     private fun getRelationshipType(reader: XMLEventReader): String {
-        if (labels) {
-            val peek = reader.peek()
-            val isChar = peek.isCharacters
-            if (isChar && !peek.asCharacters().isWhiteSpace) {
-                val value = peek.asCharacters().data
-                val el = ":"
-                val typeRel = if (value.contains(el)) value.replace(el, EMPTY) else value
-                return typeRel.trim { it <= ' ' }
-            }
-            val notStartElementOrContainsKeyLabel = (isChar
-                    || !peek.isStartElement
-                    || containsLabelKey(peek))
-            if (!peek.isEndDocument && notStartElementOrContainsKeyLabel) {
-                reader.nextEvent()
-                return getRelationshipType(reader)
-            }
+        val peek = reader.peek()
+        val isChar = peek.isCharacters
+        if (isChar && !peek.asCharacters().isWhiteSpace) {
+            val value = peek.asCharacters().data
+            val el = ":"
+            val typeRel = if (value.contains(el)) value.replace(el, EMPTY) else value
+            return typeRel.trim { it <= ' ' }
+        }
+        val notStartElementOrContainsKeyLabel = (isChar
+                || !peek.isStartElement
+                || containsLabelKey(peek))
+        if (!peek.isEndDocument && notStartElementOrContainsKeyLabel) {
+            reader.nextEvent()
+            return getRelationshipType(reader)
         }
         reader.nextEvent() // to prevent eventual wrong reader (f.e. self-closing tag)
         return defaultRelType
@@ -286,8 +380,9 @@ class XmlGraphMLReader(db: Connection) {
         if (labels.isEmpty()) return
         val parts = labels.split(LABEL_SPLIT).toTypedArray()
         for (part in parts) {
-            if (part.trim { it <= ' ' }.isEmpty()) continue
-            node.addLabel(part.trim { it <= ' ' })
+            val partStr = part.trim { it <= ' ' }.removePrefix(":")
+            if (partStr.isEmpty()) continue
+            node.addLabel(partStr)
         }
     }
 
@@ -311,6 +406,28 @@ class XmlGraphMLReader(db: Connection) {
     private fun getAttribute(element: StartElement, qname: QName): String? {
         val attribute = element.getAttributeByName(qname)
         return attribute?.value
+    }
+
+    private fun unlockGraph() {
+        val rs =
+            stmt.executeQuery("delete from pg_catalog.ag_graph where graphname = '${graphName}' RETURNING oid, nspid;")
+        if (rs.next()) {
+            graphoid = rs.getInt(1)
+            nspid = rs.getInt(2)
+        }
+        rs.close()
+    }
+
+    private fun lockGraph() {
+        var newGraphOid = 0
+        val rs =
+            stmt.executeQuery("insert into pg_catalog.ag_graph(graphname, nspid) values ('${graphName}', ${nspid}) RETURNING oid")
+        if (rs.next()) {
+            newGraphOid = rs.getInt(1)
+        }
+        rs.close()
+        stmt.execute("UPDATE pg_catalog.ag_label SET graphid=${newGraphOid} WHERE graphid=${graphoid}")
+        graphoid = newGraphOid
     }
 
     companion object {

@@ -18,4 +18,4 @@ class Node : Entity() {
     }
 }
 
-class Relationship(fromId: String, toId: String, relationshipType: String) : Entity()
+class Relationship(val fromId: String, val toId: String, val relationshipType: String) : Entity()
