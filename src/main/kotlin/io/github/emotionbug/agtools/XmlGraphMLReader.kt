@@ -426,6 +426,7 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
             newGraphOid = rs.getInt(1)
         }
         rs.close()
+        stmt.execute("UPDATE pg_catalog.pg_depend SET refobjid=${newGraphOid} WHERE refobjid=${graphoid}")
         stmt.execute("UPDATE pg_catalog.ag_label SET graphid=${newGraphOid} WHERE graphid=${graphoid}")
         graphoid = newGraphOid
     }
