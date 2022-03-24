@@ -24,7 +24,6 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
     private var nspid: Int = 0
     private var graphoid: Int = 0
 
-    private var defaultRelType: String = "UNKNOWN"
     private val labels: HashSet<String> = HashSet()
     private val labelTypes = HashMap<String, Boolean>()
 
@@ -47,8 +46,7 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
 
             override fun parseList(value: String?): Any {
                 return parseList(
-                    value,
-                    Boolean::class.java
+                    value, Boolean::class.java
                 ) { i: Any -> i as Boolean }
             }
         },
@@ -59,8 +57,7 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
 
             override fun parseList(value: String?): Any {
                 return parseList(
-                    value,
-                    Int::class.java
+                    value, Int::class.java
                 ) { n: Any -> (n as Number).toInt() }
             }
         },
@@ -71,8 +68,7 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
 
             override fun parseList(value: String?): Any {
                 return parseList(
-                    value,
-                    Long::class.java
+                    value, Long::class.java
                 ) { i: Any -> (i as Number).toLong() }
             }
         },
@@ -83,8 +79,7 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
 
             override fun parseList(value: String?): Any {
                 return parseList(
-                    value,
-                    Float::class.java
+                    value, Float::class.java
                 ) { i: Any -> (i as Number).toFloat() }
             }
         },
@@ -95,8 +90,7 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
 
             override fun parseList(value: String?): Any {
                 return parseList(
-                    value,
-                    Double::class.java
+                    value, Double::class.java
                 ) { i: Any -> (i as Number).toDouble() }
             }
         },
@@ -107,8 +101,7 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
 
             override fun parseList(value: String?): Any {
                 return parseList(
-                    value,
-                    String::class.java
+                    value, String::class.java
                 ) { i: Any -> i as String }
             }
         };
@@ -196,8 +189,7 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
                     if (last == null) continue
                     val id = getAttribute(element, KEY)
                     val isNode = last is Node
-                    var key =
-                        if (isNode) nodeKeys[id] else relKeys[id]
+                    var key = if (isNode) nodeKeys[id] else relKeys[id]
                     if (key == null) key = Key.defaultKey(id, isNode)
                     var value = key.defaultValue
                     val next = peek(reader)
@@ -207,6 +199,14 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
                     if (value != null) {
                         if (isNode && id == "labels") {
                             addLabels(last as Node, value.toString())
+                        } else if (isNode && id == "labelV") {
+                            (last as Node).addLabel(value.toString())
+                        } else if (last is Relationship && id == "labelE") {
+                            if (value.toString() != "edge") {
+                                last.relationshipType = value.toString()
+                            } else {
+                                last.relationshipType = DEFAULT_EDGE_LABEL
+                            }
                         }
                     } else if (next.eventType == XMLStreamConstants.END_ELEMENT) {
                         last.setProperty(key.name, EMPTY)
@@ -214,7 +214,9 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
                     continue
                 }
                 if (name == "node") {
-                    last?.let { createRow(it) }
+                    last?.let {
+                        createRow(it)
+                    }
                     val id = getAttribute(element, ID)!!
                     val node: Node = createNode()
 
@@ -232,13 +234,16 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
                     last?.let { createRow(it) }
                     val source = getAttribute(element, SOURCE)!!
                     val target = getAttribute(element, TARGET)!!
-                    val relationshipType: String = getAttribute(element, LABEL) ?: getRelationshipType(reader)
+                    val relationshipType: String = getAttribute(element, LABEL) ?: DEFAULT_EDGE_LABEL
                     val relationship: Relationship = createRelationship(source, target, relationshipType)
                     setDefaults(relKeys, relationship)
                     last = relationship
                     count++
                 }
             }
+        }
+        last?.let {
+            createRow(it)
         }
         finalize()
         stmt.close()
@@ -252,9 +257,7 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
         for (label in labels) {
             if (labelTypes[label] == true) {
                 var rs = stmt.executeQuery(
-                    "SELECT column_default\n" +
-                            "FROM information_schema.columns\n" +
-                            "WHERE (table_schema, table_name, column_name) = ('${graphName.lowercase()}', '${label.lowercase()}', 'id')"
+                    "SELECT column_default\n" + "FROM information_schema.columns\n" + "WHERE (table_schema, table_name, column_name) = ('${graphName.lowercase()}', '${label.lowercase()}', 'id')"
                 )
                 var idDefaultSeq = ""
                 var labid = 0
@@ -280,9 +283,7 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
         for (label in labels) {
             if (labelTypes[label] == false) {
                 var rs = stmt.executeQuery(
-                    "SELECT column_default\n" +
-                            "FROM information_schema.columns\n" +
-                            "WHERE (table_schema, table_name, column_name) = ('${graphName.lowercase()}', '${label.lowercase()}', 'id')"
+                    "SELECT column_default\n" + "FROM information_schema.columns\n" + "WHERE (table_schema, table_name, column_name) = ('${graphName.lowercase()}', '${label.lowercase()}', 'id')"
                 )
                 var idDefaultSeq = ""
                 var labid = 0
@@ -303,24 +304,29 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
 
                 for (sublabels in labels) {
                     if (labelTypes[sublabels] == true) {
-                        stmt.execute("UPDATE ml_${label} SET from_gid = ml_${sublabels}.graphid FROM ml_${sublabels} WHERE ml_${label}._from = ml_${sublabels}.id")
-                        stmt.execute("UPDATE ml_${label} SET to_gid = ml_${sublabels}.graphid FROM ml_${sublabels} WHERE ml_${label}._to = ml_${sublabels}.id")
+                        stmt.execute("UPDATE ml_${label} SET from_gid = ml_${sublabels}.graphid FROM ml_${sublabels} WHERE \"ml_${label}\"._from = ml_${sublabels}.id")
+                        stmt.execute("UPDATE ml_${label} SET to_gid = ml_${sublabels}.graphid FROM ml_${sublabels} WHERE \"ml_${label}\"._to = ml_${sublabels}.id")
                     }
                 }
 //                stmt.execute("DELETE FROM ml_${label} WHERE from_gid IS NULL or to_gid IS NULL")
-                stmt.execute("INSERT INTO ${label}(id, start, \"end\", properties) SELECT graphid, from_gid, to_gid, property FROM ml_${label}")
+                stmt.execute("INSERT INTO \"${label}\"(id, start, \"end\", properties) SELECT graphid, from_gid, to_gid, property FROM \"ml_${label}\"")
             }
+        }
+
+        for (label in labels) {
+            stmt.execute("DROP TABLE \"ml_${label}\"")
         }
         lockGraph()
     }
 
     private fun createRow(entity: Entity) {
-        if (entity is Node && entity.label != null) {
+        if (entity is Node) {
+            if (entity.label == null) entity.label = DEFAULT_VERTEX_LABEL
             if (!labels.contains(entity.label)) {
                 unlockGraph()
                 stmt.execute("CREATE TABLE ml_${entity.label}(id TEXT PRIMARY KEY, property jsonb)")
                 lockGraph()
-                stmt.execute("CREATE VLABEL ${entity.label}")
+                stmt.execute("CREATE VLABEL \"${entity.label}\"")
                 labels.add(entity.label!!)
                 labelTypes[entity.label!!] = true
             }
@@ -332,7 +338,7 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
                 stmt.execute("CREATE INDEX idx_${entity.relationshipType}_from ON ml_${entity.relationshipType}(_from)")
                 stmt.execute("CREATE INDEX idx_${entity.relationshipType}_to ON ml_${entity.relationshipType}(_to)")
                 lockGraph()
-                stmt.execute("CREATE ELABEL ${entity.relationshipType}")
+                stmt.execute("CREATE ELABEL \"${entity.relationshipType}\"")
                 labels.add(entity.relationshipType)
                 labelTypes[entity.relationshipType] = false
             }
@@ -348,26 +354,26 @@ class XmlGraphMLReader(db: Connection, private val graphName: String) {
         return Relationship(fromId, toId, relationshipType)
     }
 
-    @Throws(XMLStreamException::class)
-    private fun getRelationshipType(reader: XMLEventReader): String {
-        val peek = reader.peek()
-        val isChar = peek.isCharacters
-        if (isChar && !peek.asCharacters().isWhiteSpace) {
-            val value = peek.asCharacters().data
-            val el = ":"
-            val typeRel = if (value.contains(el)) value.replace(el, EMPTY) else value
-            return typeRel.trim { it <= ' ' }
-        }
-        val notStartElementOrContainsKeyLabel = (isChar
-                || !peek.isStartElement
-                || containsLabelKey(peek))
-        if (!peek.isEndDocument && notStartElementOrContainsKeyLabel) {
-            reader.nextEvent()
-            return getRelationshipType(reader)
-        }
-        reader.nextEvent() // to prevent eventual wrong reader (f.e. self-closing tag)
-        return defaultRelType
-    }
+//    @Throws(XMLStreamException::class)
+//    private fun getRelationshipType(reader: XMLEventReader): String {
+//        val peek = reader.peek()
+//        val isChar = peek.isCharacters
+//        if (isChar && !peek.asCharacters().isWhiteSpace) {
+//            val value = peek.asCharacters().data
+//            val el = ":"
+//            val typeRel = if (value.contains(el)) value.replace(el, EMPTY) else value
+//            return typeRel.trim { it <= ' ' }
+//        }
+//        val notStartElementOrContainsKeyLabel = (isChar
+//                || !peek.isStartElement
+//                || containsLabelKey(peek))
+//        if (!peek.isEndDocument && notStartElementOrContainsKeyLabel) {
+//            reader.nextEvent()
+//            return getRelationshipType(reader)
+//        }
+//        reader.nextEvent() // to prevent eventual wrong reader (f.e. self-closing tag)
+//        return DEFAULT_EDGE_LABEL
+//    }
 
     private fun containsLabelKey(peek: XMLEvent): Boolean {
         val keyAttribute = peek.asStartElement().getAttributeByName(QName("key"))

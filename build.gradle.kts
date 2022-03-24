@@ -1,4 +1,5 @@
 plugins {
+    id("com.github.johnrengelman.shadow") version "7.1.2"
     kotlin("jvm") version "1.5.10"
 }
 
@@ -8,6 +9,15 @@ version = "1.0-SNAPSHOT"
 repositories {
     mavenCentral()
 }
+
+tasks {
+    shadowJar {
+        manifest {
+            attributes(Pair("Main-Class", "io.github.emotionbug.agtools.MainKt"))
+        }
+    }
+}
+
 
 dependencies {
     implementation(kotlin("stdlib"))
